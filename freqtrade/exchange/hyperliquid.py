@@ -8,12 +8,10 @@ from typing import Any
 
 from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, TradingMode
-<<<<<<< HEAD
 from freqtrade.exceptions import ExchangeError, OperationalException, RetryableOrderError, TemporaryError
-=======
+
 from freqtrade.enums.runmode import NON_UTIL_MODES
 from freqtrade.exceptions import ConfigurationError, ExchangeError, OperationalException
->>>>>>> 8e91fea11f3cc0354b952a5b667628b18378c7fe
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import CcxtBalances, CcxtOrder, CcxtPosition, FtHas
 from freqtrade.util.datetime_helpers import dt_from_ts
