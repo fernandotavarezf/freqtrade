@@ -132,6 +132,18 @@ def retrier_async(f):
                         )
                         # Reset msg to avoid logging too many times.
                         msg = ""
+                    elif args[0].name == "Hyperliquid" and "429" in str(ex):
+                        # Hyperliquid-specific 429 handling with longer backoff
+                        hyperliquid_delay = calculate_backoff(count + 1, API_RETRY_COUNT) * 2
+                        logger.info(f"Hyperliquid 429 error, applying extended backoff delay: {hyperliquid_delay}")
+                        _get_logging_mixin().log_once(
+                            f"Hyperliquid rate limit hit (429), applying extended backoff. "
+                            f"{count} tries left before giving up",
+                            logmethod=logger.warning,
+                        )
+                        await asyncio.sleep(hyperliquid_delay)
+                        # Reset msg to avoid logging too many times.
+                        msg = ""
                     else:
                         backoff_delay = calculate_backoff(count + 1, API_RETRY_COUNT)
                         logger.info(f"Applying DDosProtection backoff delay: {backoff_delay}")

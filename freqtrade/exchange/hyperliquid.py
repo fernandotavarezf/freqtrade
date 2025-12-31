@@ -1,5 +1,6 @@
 """Hyperliquid exchange subclass"""
 
+import asyncio
 import logging
 from copy import deepcopy
 from datetime import datetime
@@ -7,7 +8,7 @@ from typing import Any
 
 from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, TradingMode
-from freqtrade.exceptions import ExchangeError, OperationalException
+from freqtrade.exceptions import ExchangeError, OperationalException, RetryableOrderError, TemporaryError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas
 from freqtrade.util.datetime_helpers import dt_from_ts
@@ -181,46 +182,276 @@ class Hyperliquid(Exchange):
         order: dict,
     ) -> dict:
         """
-        Adjusts order response for Hyperliquid
+        Adjusts order response for Hyperliquid with enhanced verification
         :param order: Order response from Hyperliquid
         :return: Adjusted order response
         """
-        if (
-            order["average"] is None
-            and order["status"] in ("canceled", "closed")
-            and order["filled"] > 0
-        ):
+        order_id = order.get("id", "unknown")
+        symbol = order.get("symbol", "unknown")
+        status = order.get("status", "unknown")
+        filled = order.get("filled", 0)
+        amount = order.get("amount", 0)
+        
+        logger.info(f"Adjusting Hyperliquid order {order_id} for {symbol}: "
+                   f"status={status}, filled={filled}, amount={amount}")
+        
+        # Enhanced verification for unfilled or problematic orders
+        if status == "closed" and filled == 0:
+            logger.error(f"Order {order_id} closed but not filled - potential execution issue")
+            # This might indicate a problem with the order execution
+            # Consider raising an exception or marking the order as failed
+            order["status"] = "failed"
+            order["reason"] = "Order closed without execution"
+            
+        elif status == "canceled" and filled > 0:
+            logger.warning(f"Order {order_id} was partially filled before cancellation: "
+                          f"filled={filled}, original_amount={amount}")
+            
+        elif status in ("canceled", "closed") and filled > 0 and order["average"] is None:
             # Hyperliquid does not fill the average price in the order response
             # Fetch trades to calculate the average price to have the actual price
             # the order was executed at
-            trades = self.get_trades_for_order(
-                order["id"], order["symbol"], since=dt_from_ts(order["timestamp"])
-            )
-
-            if trades:
-                total_amount = sum(t["amount"] for t in trades)
-                order["average"] = (
-                    sum(t["price"] * t["amount"] for t in trades) / total_amount
-                    if total_amount
-                    else None
+            logger.info(f"Calculating average price for order {order_id} from trades")
+            try:
+                trades = self.get_trades_for_order(
+                    order["id"], order["symbol"], since=dt_from_ts(order["timestamp"])
                 )
+
+                if trades:
+                    total_amount = sum(t["amount"] for t in trades)
+                    if total_amount > 0:
+                        weighted_sum = sum(t["price"] * t["amount"] for t in trades)
+                        order["average"] = weighted_sum / total_amount
+                        logger.info(f"Calculated average price: {order['average']} for order {order_id}")
+                    else:
+                        logger.warning(f"No trade amount found for order {order_id}")
+                else:
+                    logger.warning(f"No trades found for executed order {order_id}")
+                    # If order is closed/filled but no trades found, this might be an issue
+                    if filled > 0:
+                        logger.error(f"Order {order_id} shows as filled but no trades found - data inconsistency")
+                        
+            except Exception as ex:
+                logger.error(f"Error fetching trades for order {order_id}: {ex}")
+                # Don't fail the order adjustment, but log the error
+                
+        elif status == "open" and filled > 0:
+            logger.info(f"Order {order_id} is partially filled: {filled}/{amount}")
+            
+        # Additional validation
+        if filled > amount:
+            logger.warning(f"Order {order_id} filled amount ({filled}) exceeds original amount ({amount})")
+            
         return order
+
+    def _verify_order_execution_sync(self, order_id: str, pair: str, max_retries: int = 5) -> dict:
+        """
+        Synchronous wrapper for order execution verification
+        :param order_id: Order ID to verify
+        :param pair: Trading pair
+        :param max_retries: Maximum number of retries
+        :return: Verified order data
+        :raises: RetryableOrderError if verification fails
+        """
+        # Create a new event loop for this thread if needed
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        return loop.run_until_complete(self._verify_order_execution(order_id, pair, max_retries))
+
+    async def _verify_order_execution(self, order_id: str, pair: str, max_retries: int = 5) -> dict:
+        """
+        Verify that an order has been executed properly on Hyperliquid
+        :param order_id: Order ID to verify
+        :param pair: Trading pair
+        :param max_retries: Maximum number of retries
+        :return: Verified order data
+        :raises: RetryableOrderError if verification fails
+        """
+        for attempt in range(max_retries):
+            try:
+                order = self.fetch_order(order_id, pair)
+                
+                # Log order status for debugging
+                logger.info(f"Order {order_id} verification attempt {attempt + 1}: "
+                          f"status={order.get('status')}, filled={order.get('filled')}, "
+                          f"remaining={order.get('remaining')}")
+                
+                # Check if order is properly filled
+                if order.get('status') == 'closed' and order.get('filled', 0) > 0:
+                    logger.info(f"Order {order_id} successfully verified as filled")
+                    return order
+                elif order.get('status') == 'canceled':
+                    logger.warning(f"Order {order_id} was canceled")
+                    raise RetryableOrderError(f"Order {order_id} was canceled on Hyperliquid")
+                elif order.get('status') == 'open' and attempt < max_retries - 1:
+                    # Wait a bit longer for Hyperliquid to process the order
+                    wait_time = (attempt + 1) * 2
+                    logger.info(f"Order {order_id} still open, waiting {wait_time}s before retry")
+                    await asyncio.sleep(wait_time)
+                    continue
+                elif order.get('filled', 0) == 0 and order.get('status') == 'closed':
+                    logger.error(f"Order {order_id} closed but not filled - this indicates a problem")
+                    raise RetryableOrderError(f"Order {order_id} closed but not filled on Hyperliquid")
+                
+            except TemporaryError as ex:
+                logger.warning(f"Temporary error verifying order {order_id}: {ex}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep((attempt + 1) * 2)
+                    continue
+                else:
+                    raise RetryableOrderError(f"Failed to verify order {order_id} after {max_retries} attempts: {ex}")
+            except Exception as ex:
+                logger.error(f"Error verifying order {order_id}: {ex}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep((attempt + 1) * 2)
+                    continue
+                else:
+                    raise RetryableOrderError(f"Failed to verify order {order_id} after {max_retries} attempts: {ex}")
+        
+        # If we get here, verification failed
+        raise RetryableOrderError(f"Order {order_id} verification failed after {max_retries} attempts")
+
+    def create_order(self, pair: str, ordertype: str, side: str, amount: float,
+                    price: float | None = None, params: dict | None = None) -> CcxtOrder:
+        """
+        Create an order on Hyperliquid with enhanced verification
+        :param pair: Trading pair
+        :param ordertype: Order type (market, limit, etc.)
+        :param side: Order side (buy, sell)
+        :param amount: Order amount
+        :param price: Order price (for limit orders)
+        :param params: Additional parameters
+        :return: Created order with verification
+        """
+        try:
+            # Create the order
+            logger.info(f"Creating {ordertype} {side} order for {pair} with amount {amount}")
+            order = super().create_order(pair, ordertype, side, amount, price, params)
+            
+            # Log initial order creation
+            logger.info(f"Order created successfully: {order.get('id')} with status: {order.get('status')}")
+            
+            # For market orders, verify execution immediately
+            if ordertype == 'market':
+                logger.info(f"Market order detected, verifying execution for order {order.get('id')}")
+                try:
+                    verified_order = self._verify_order_execution_sync(order.get('id'), pair)
+                    return verified_order
+                except RetryableOrderError as ex:
+                    logger.error(f"Market order verification failed: {ex}")
+                    # If verification fails, return the original order but mark it as needing attention
+                    order["verification_failed"] = True
+                    order["verification_error"] = str(ex)
+                    return order
+            
+            return order
+            
+        except TemporaryError as ex:
+            logger.error(f"Temporary error creating order on Hyperliquid: {ex}")
+            if "429" in str(ex):
+                logger.warning("Hyperliquid rate limit exceeded, will retry with backoff")
+            raise TemporaryError(f"Hyperliquid temporary error: {ex}")
+        except ExchangeError as ex:
+            logger.error(f"Exchange error creating order on Hyperliquid: {ex}")
+            if "insufficient" in str(ex).lower():
+                raise ExchangeError(f"Insufficient balance on Hyperliquid: {ex}")
+            elif "rate" in str(ex).lower() or "limit" in str(ex).lower():
+                raise TemporaryError(f"Hyperliquid rate limiting: {ex}")
+            else:
+                raise ExchangeError(f"Failed to create order on Hyperliquid: {ex}")
+        except Exception as ex:
+            logger.error(f"Unexpected error creating order on Hyperliquid: {ex}")
+            raise ExchangeError(f"Unexpected error creating order on Hyperliquid: {ex}")
 
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:
-        order = super().fetch_order(order_id, pair, params)
-
-        order = self._adjust_hyperliquid_order(order)
-        self._log_exchange_response("fetch_order2", order)
-
-        return order
+        """
+        Fetch order with enhanced error handling for Hyperliquid
+        :param order_id: Order ID to fetch
+        :param pair: Trading pair
+        :param params: Additional parameters
+        :return: Order data
+        """
+        try:
+            logger.info(f"Fetching order {order_id} for {pair}")
+            order = super().fetch_order(order_id, pair, params)
+            
+            if not order:
+                logger.warning(f"No order data returned for order {order_id}")
+                raise ExchangeError(f"No order data returned for order {order_id}")
+                
+            order = self._adjust_hyperliquid_order(order)
+            self._log_exchange_response("fetch_order2", order)
+            
+            logger.info(f"Successfully fetched order {order_id}: status={order.get('status')}")
+            return order
+            
+        except TemporaryError as ex:
+            logger.error(f"Temporary error fetching order {order_id}: {ex}")
+            if "429" in str(ex):
+                logger.warning(f"Hyperliquid rate limit hit while fetching order {order_id}")
+            raise TemporaryError(f"Failed to fetch order {order_id}: {ex}")
+        except ExchangeError as ex:
+            logger.error(f"Exchange error fetching order {order_id}: {ex}")
+            raise ExchangeError(f"Failed to fetch order {order_id}: {ex}")
+        except Exception as ex:
+            logger.error(f"Unexpected error fetching order {order_id}: {ex}")
+            raise ExchangeError(f"Unexpected error fetching order {order_id}: {ex}")
 
     def fetch_orders(
         self, pair: str, since: datetime, params: dict | None = None
     ) -> list[CcxtOrder]:
-        orders = super().fetch_orders(pair, since, params)
-        for idx, order in enumerate(deepcopy(orders)):
-            order2 = self._adjust_hyperliquid_order(order)
-            orders[idx] = order2
+        """
+        Fetch orders with enhanced error handling for Hyperliquid
+        :param pair: Trading pair
+        :param since: Start time
+        :param params: Additional parameters
+        :return: List of orders
+        """
+        try:
+            logger.info(f"Fetching orders for {pair} since {since}")
+            orders = super().fetch_orders(pair, since, params)
+            
+            if not isinstance(orders, list):
+                logger.error(f"Expected list of orders, got {type(orders)}")
+                raise ExchangeError(f"Invalid response format when fetching orders for {pair}")
+                
+            logger.info(f"Fetched {len(orders)} orders for {pair}")
+            
+            for idx, order in enumerate(deepcopy(orders)):
+                order2 = self._adjust_hyperliquid_order(order)
+                orders[idx] = order2
 
-        self._log_exchange_response("fetch_orders2", orders)
-        return orders
+            self._log_exchange_response("fetch_orders2", orders)
+            logger.info(f"Successfully processed {len(orders)} orders for {pair}")
+            return orders
+            
+        except TemporaryError as ex:
+            logger.error(f"Temporary error fetching orders for {pair}: {ex}")
+            if "429" in str(ex):
+                logger.warning(f"Hyperliquid rate limit hit while fetching orders for {pair}")
+            raise TemporaryError(f"Failed to fetch orders for {pair}: {ex}")
+        except ExchangeError as ex:
+            logger.error(f"Exchange error fetching orders for {pair}: {ex}")
+            raise ExchangeError(f"Failed to fetch orders for {pair}: {ex}")
+        except Exception as ex:
+            logger.error(f"Unexpected error fetching orders for {pair}: {ex}")
+            raise ExchangeError(f"Unexpected error fetching orders for {pair}: {ex}")
+    def get_valid_pair_combination(self, curr_1: str, curr_2: str) -> Generator[str, None, None]:
+        """
+        Get valid pair combination of curr_1 and curr_2 by trying both combinations.
+        """
+        yielded = False
+        for pair in (
+            f"{curr_1}/{curr_2}",
+            f"{curr_2}/{curr_1}",
+        ):
+            if pair in self.markets and self.markets[pair].get("active"):
+                yielded = True
+                yield pair
+        if not yielded:
+            raise ValueError(f"Could not combine {curr_1} and {curr_2} to get a valid pair.")
+

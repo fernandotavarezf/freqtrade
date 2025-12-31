@@ -1,0 +1,20 @@
+{
+  "timestamp": "2025-12-31T17:21:57.404514",
+  "results": [
+    {
+      "model": "meta/llama-3.3-70b-instruct",
+      "status": "success",
+      "time": 1.500663
+    },
+    {
+      "model": "meta/llama-3.1-70b-instruct",
+      "status": "success",
+      "time": 13.770619
+    },
+    {
+      "model": "meta/llama-3.1-405b-instruct",
+      "status": "success",
+      "time": 1.490944
+    }
+  ]
+}

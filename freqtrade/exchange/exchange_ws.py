@@ -170,21 +170,82 @@ class ExchangeWS:
     async def _continuously_async_watch_ohlcv(
         self, pair: str, timeframe: str, candle_type: CandleType
     ) -> None:
+        retry_count = 0
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
         try:
             while (pair, timeframe, candle_type) in self._klines_watching:
                 start = dt_ts()
-                data = await self._ccxt_object.watch_ohlcv(pair, timeframe)
-                self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
-                logger.debug(
-                    f"watch done {pair}, {timeframe}, data {len(data)} "
-                    f"in {(dt_ts() - start) / 1000:.3f}s"
-                )
-        except ccxt.ExchangeClosedByUser:
-            logger.debug("Exchange connection closed by user")
-        except ccxt.BaseError:
-            logger.exception(f"Exception in continuously_async_watch_ohlcv for {pair}, {timeframe}")
+                try:
+                    data = await self._ccxt_object.watch_ohlcv(pair, timeframe)
+                    self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
+                    logger.debug(
+                        f"watch done {pair}, {timeframe}, data {len(data)} "
+                        f"in {(dt_ts() - start) / 1000:.3f}s"
+                    )
+                    # Reset retry count on successful watch
+                    retry_count = 0
+                    
+                except ccxt.UnsubscribeError as e:
+                    logger.warning(
+                        f"WebSocket unsubscribed by exchange for {pair}, {timeframe}: {e}. "
+                        f"Retry attempt {retry_count + 1}/{max_retries}"
+                    )
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        logger.info(f"Waiting {retry_delay} seconds before retrying WebSocket for {pair}, {timeframe}")
+                        await asyncio.sleep(retry_delay)
+                        # Try to resubscribe by removing and re-adding to watchlist
+                        self._klines_watching.discard((pair, timeframe, candle_type))
+                        await asyncio.sleep(1)
+                        self._klines_watching.add((pair, timeframe, candle_type))
+                        continue
+                    else:
+                        logger.error(
+                            f"Max retries exceeded for WebSocket {pair}, {timeframe}. "
+                            "Falling back to REST API."
+                        )
+                        break
+                        
+                except ccxt.ExchangeClosedByUser:
+                    logger.debug(f"Exchange connection closed by user for {pair}, {timeframe}")
+                    break
+                    
+                except ccxt.NetworkError as e:
+                    logger.warning(
+                        f"Network error in WebSocket for {pair}, {timeframe}: {e}. "
+                        f"Retry attempt {retry_count + 1}/{max_retries}"
+                    )
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"Max network error retries exceeded for WebSocket {pair}, {timeframe}. "
+                            "Falling back to REST API."
+                        )
+                        break
+                        
+                except ccxt.BaseError as e:
+                    logger.exception(
+                        f"Exception in continuously_async_watch_ohlcv for {pair}, {timeframe}: {e}"
+                    )
+                    break
+                    
+                except Exception as e:
+                    logger.exception(
+                        f"Unexpected exception in continuously_async_watch_ohlcv for {pair}, {timeframe}: {e}"
+                    )
+                    break
+                    
+        except asyncio.CancelledError:
+            logger.debug(f"WebSocket task cancelled for {pair}, {timeframe}")
+            raise
         finally:
             self._klines_watching.discard((pair, timeframe, candle_type))
+            logger.debug(f"WebSocket monitoring ended for {pair}, {timeframe}")
 
     def schedule_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         """
