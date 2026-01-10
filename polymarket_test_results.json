@@ -1,0 +1,127 @@
+{
+  "test_run": {
+    "timestamp": "2026-01-02T18:46:33.683478",
+    "overall_status": "FAIL"
+  },
+  "summary": {
+    "timestamp": "2026-01-02T18:46:33.683478",
+    "api_connection": true,
+    "market_fetching": true,
+    "price_extraction": true,
+    "probabilities_valid": false,
+    "sentiment_calculation": true,
+    "overall_status": "FAIL"
+  },
+  "detailed_results": {
+    "test1": {
+      "success": true,
+      "markets_count": 10,
+      "markets": [
+        {
+          "id": "516926",
+          "question": "MicroStrategy sells any Bitcoin in 2025?",
+          "active": true,
+          "outcomes": [
+            {
+              "name": "Yes",
+              "price": 0.0015
+            },
+            {
+              "name": "No",
+              "price": 0.9985
+            }
+          ]
+        },
+        {
+          "id": "516938",
+          "question": "Will 2025 be the hottest year on record?",
+          "active": true,
+          "outcomes": [
+            {
+              "name": "Yes",
+              "price": 0.0025
+            },
+            {
+              "name": "No",
+              "price": 0.9975
+            }
+          ]
+        },
+        {
+          "id": "517014",
+          "question": "Will The Fantastic Four: First Steps be the top grossing movie of 2025?",
+          "active": true,
+          "outcomes": [
+            {
+              "name": "Yes",
+              "price": 0.0005
+            },
+            {
+              "name": "No",
+              "price": 0.9995
+            }
+          ]
+        }
+      ],
+      "has_valid_probabilities": true
+    },
+    "test2": {
+      "success": true,
+      "markets_count": 1,
+      "markets": [
+        {
+          "id": "516926",
+          "question": "MicroStrategy sells any Bitcoin in 2025?",
+          "active": true,
+          "outcomes": [
+            {
+              "name": "Yes",
+              "price": 0.0015
+            },
+            {
+              "name": "No",
+              "price": 0.9985
+            }
+          ]
+        }
+      ],
+      "has_valid_probabilities": true
+    },
+    "test3": {
+      "success": true,
+      "markets_count": 0,
+      "markets": [],
+      "has_valid_probabilities": false
+    },
+    "test4": {
+      "success": true,
+      "extraction_works": true,
+      "has_prices": true,
+      "sample_market": {
+        "id": "516926",
+        "question": "MicroStrategy sells any Bitcoin in 2025?",
+        "active": true,
+        "outcomes": [
+          {
+            "name": "Yes",
+            "price": 0.0015
+          },
+          {
+            "name": "No",
+            "price": 0.9985
+          }
+        ]
+      }
+    },
+    "test5": {
+      "success": true,
+      "sentiment_data": {
+        "bullish_markets": 2,
+        "bearish_markets": 8,
+        "neutral_markets": 0,
+        "avg_bullish_prob": 0.9590000000000001,
+        "sentiment": "bearish"
+      }
+    }
+  }
+}
